@@ -21,6 +21,15 @@ use p3_util::{log2_strict_usize, reverse_bits_len, reverse_slice_index_bits, Vec
 use serde::{Deserialize, Serialize};
 use tracing::{info_span, instrument};
 
+use p3_baby_bear::BabyBear;
+use p3_field::PrimeField32;
+use icicle_babybear::field::ScalarField;
+use icicle_cuda_runtime::{device_context::DeviceContext, stream::CudaStream,memory::HostSlice};
+use icicle_core::{
+    ntt::{self, initialize_domain, NTTConfig, NTTDir},
+    traits::{FieldImpl, GenerateRandom},
+};
+
 use crate::verifier::{self, FriError};
 use crate::{prover, FriConfig, FriProof};
 
@@ -106,7 +115,7 @@ where
         &self,
         evaluations: Vec<(Self::Domain, RowMajorMatrix<Val>)>,
     ) -> (Self::Commitment, Self::ProverData) {
-        let ldes: Vec<_> = evaluations
+        let ldes: Vec<_> = evaluations.clone()
             .into_iter()
             .map(|(domain, evals)| {
                 assert_eq!(domain.size(), evals.height());
@@ -121,6 +130,44 @@ where
             })
             .collect();
 
+        let ldes_gpu: Vec<_> = evaluations
+            .into_iter()
+            .map(|(domain, evals)| {
+                assert_eq!(domain.size(), evals.height());
+                // let shift = Val::generator() / domain.shift;
+                let log_n = log2_strict_usize(domain.size());
+
+                let ctx = DeviceContext::default(); 
+                let size = 1 << log_n; 
+                let plonky3_rou = BabyBear::two_adic_generator(log_n);
+                initialize_domain(ScalarField::from([plonky3_rou.as_canonical_u32()]), &ctx, false).unwrap();
+
+                let mut scalars: Vec<ScalarField> = <ScalarField as FieldImpl>::Config::generate_random(size);
+                let scalars_p3: Vec<BabyBear> = scalars
+                    .iter()
+                    .map(|x| BabyBear::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
+                    .collect();
+                let matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width());
+
+                let mut ntt_cfg: NTTConfig<'_, ScalarField> = NTTConfig::default();
+                let stream = CudaStream::create().unwrap();
+
+                ntt_cfg.ctx.stream = &stream;
+                ntt_cfg.batch_size = 1 as i32;
+                ntt_cfg.columns_batch = true;
+                ntt::ntt(HostSlice::from_mut_slice(&mut scalars.clone()[..]), NTTDir::kForward, &ntt_cfg, HostSlice::from_mut_slice(&mut scalars[..])).unwrap();
+
+                stream.synchronize().unwrap();
+                // Commit to the bit-reversed LDE.
+                // self.dft
+                //     .coset_lde_batch(evals, self.fri.log_blowup, shift)
+                //     .bit_reverse_rows()
+                //     .to_row_major_matrix()
+                matrix_p3
+            })
+            .collect();
+        
+        //assert_eq!(ldes, ldes_gpu);
         self.mmcs.commit(ldes)
     }
 

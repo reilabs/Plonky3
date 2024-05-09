@@ -1,6 +1,7 @@
 //! An implementation of the FRI low-degree test (LDT).
 
-#![no_std]
+// I wanted macros, so I commented this out
+//#![no_std]
 
 extern crate alloc;
 
