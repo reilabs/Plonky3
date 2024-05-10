@@ -27,7 +27,7 @@ use icicle_babybear::field::ScalarField;
 use icicle_cuda_runtime::{device_context::DeviceContext, stream::CudaStream,memory::HostSlice};
 use icicle_core::{
     ntt::{self, initialize_domain, NTTConfig, NTTDir, NttAlgorithm},
-    traits::{FieldImpl, GenerateRandom},
+    traits::FieldImpl,
 };
 
 use crate::verifier::{self, FriError};
@@ -144,14 +144,10 @@ where
 
                 initialize_domain(ScalarField::from([plonky3_rou.clone().as_canonical_u32()]), &ctx, false).unwrap();
 
-                let mut ntt_results: Vec<ScalarField> = vec![ScalarField::from_u32(evals.values[0].as_canonical_u32()); evals.values.len()];
-                let mut actual_scalars : Vec<ScalarField> = evals.values.iter().map(|x| ScalarField::from_u32((*x).as_canonical_u32())).collect();
+                let mut ntt_results = DeviceVec::<ScalarField>::cuda_malloc(evals.values.len()).unwrap();
+                let mut host_ntt_results = vec![ScalarField::zero(); evals.values.len()];
 
-                let scalars_p3: Vec<Val> = actual_scalars
-                    .iter()
-                    .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
-                    .collect();
-                let matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width());
+                let mut actual_scalars : Vec<ScalarField> = evals.values.iter().map(|x| ScalarField::from_u32((*x).as_canonical_u32())).collect();
 
                 let mut ntt_cfg: NTTConfig<'_, ScalarField> = NTTConfig::default();
                 let stream = CudaStream::create().unwrap();
@@ -162,9 +158,19 @@ where
                 ntt_cfg.ntt_algorithm = NttAlgorithm::Radix2;
                 ntt_cfg.coset_gen = <ScalarField as FieldImpl>::one();
 
-                ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars.clone()[..]), NTTDir::kInverse, &ntt_cfg, HostSlice::from_mut_slice(&mut ntt_results[..])).unwrap();
+                ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars.clone()[..]), NTTDir::kInverse, &ntt_cfg, &mut ntt_results[..]).unwrap();
 
                 stream.synchronize().unwrap();
+                ntt_results
+                    .copy_to_host(HostSlice::from_mut_slice(&mut host_ntt_results[..]))
+                    .unwrap();
+
+                let scalars_p3: Vec<Val> = host_ntt_results
+                    .iter()
+                    .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
+                    .collect();
+                let matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width());
+
                 matrix_p3.bit_reverse_rows().to_row_major_matrix()
             })
             .collect();
