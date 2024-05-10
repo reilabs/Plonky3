@@ -26,7 +26,7 @@ use p3_field::PrimeField32;
 use icicle_babybear::field::ScalarField;
 use icicle_cuda_runtime::{device_context::DeviceContext, stream::CudaStream,memory::HostSlice};
 use icicle_core::{
-    ntt::{self, initialize_domain, NTTConfig, NTTDir},
+    ntt::{self, initialize_domain, NTTConfig, NTTDir, NttAlgorithm},
     traits::{FieldImpl, GenerateRandom},
 };
 
@@ -88,7 +88,7 @@ pub struct BatchOpening<Val: Field, InputMmcs: Mmcs<Val>> {
 impl<Val, Dft, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challenger>
     for TwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs>
 where
-    Val: TwoAdicField,
+    Val: TwoAdicField + PrimeField32,
     Dft: TwoAdicSubgroupDft<Val>,
     InputMmcs: Mmcs<Val>,
     FriMmcs: Mmcs<Challenge>,
@@ -134,18 +134,22 @@ where
             .into_iter()
             .map(|(domain, evals)| {
                 assert_eq!(domain.size(), evals.height());
-                // let shift = Val::generator() / domain.shift;
+                let shift = Val::generator() / domain.shift;
                 let log_n = log2_strict_usize(domain.size());
 
                 let ctx = DeviceContext::default(); 
-                let size = 1 << log_n; 
-                let plonky3_rou = BabyBear::two_adic_generator(log_n);
-                initialize_domain(ScalarField::from([plonky3_rou.as_canonical_u32()]), &ctx, false).unwrap();
+                let size = 1 << log_n;
+                println!("size {:?}", size);
+                let plonky3_rou = BabyBear::two_adic_generator(26);
 
-                let mut scalars: Vec<ScalarField> = <ScalarField as FieldImpl>::Config::generate_random(size);
-                let scalars_p3: Vec<BabyBear> = scalars
+                initialize_domain(ScalarField::from([plonky3_rou.clone().as_canonical_u32()]), &ctx, false).unwrap();
+
+                let mut ntt_results: Vec<ScalarField> = vec![ScalarField::from_u32(evals.values[0].as_canonical_u32()); evals.values.len()];
+                let mut actual_scalars : Vec<ScalarField> = evals.values.iter().map(|x| ScalarField::from_u32((*x).as_canonical_u32())).collect();
+
+                let scalars_p3: Vec<Val> = actual_scalars
                     .iter()
-                    .map(|x| BabyBear::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
+                    .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
                     .collect();
                 let matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width());
 
@@ -155,19 +159,16 @@ where
                 ntt_cfg.ctx.stream = &stream;
                 ntt_cfg.batch_size = 1 as i32;
                 ntt_cfg.columns_batch = true;
-                ntt::ntt(HostSlice::from_mut_slice(&mut scalars.clone()[..]), NTTDir::kForward, &ntt_cfg, HostSlice::from_mut_slice(&mut scalars[..])).unwrap();
+                ntt_cfg.ntt_algorithm = NttAlgorithm::Radix2;
+                ntt_cfg.coset_gen = <ScalarField as FieldImpl>::one();
+
+                ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars.clone()[..]), NTTDir::kInverse, &ntt_cfg, HostSlice::from_mut_slice(&mut ntt_results[..])).unwrap();
 
                 stream.synchronize().unwrap();
-                // Commit to the bit-reversed LDE.
-                // self.dft
-                //     .coset_lde_batch(evals, self.fri.log_blowup, shift)
-                //     .bit_reverse_rows()
-                //     .to_row_major_matrix()
-                matrix_p3
+                matrix_p3.bit_reverse_rows().to_row_major_matrix()
             })
             .collect();
-        
-        //assert_eq!(ldes, ldes_gpu);
+        assert_eq!(ldes[0].values[0..5], ldes_gpu[0].values[0..5]);
         self.mmcs.commit(ldes)
     }
 
