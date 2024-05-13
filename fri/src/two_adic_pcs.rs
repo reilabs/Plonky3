@@ -21,13 +21,12 @@ use p3_util::{log2_strict_usize, reverse_bits_len, reverse_slice_index_bits, Vec
 use serde::{Deserialize, Serialize};
 use tracing::{info_span, instrument};
 
-use p3_baby_bear::BabyBear;
 use p3_field::PrimeField32;
 use icicle_babybear::field::ScalarField;
-use icicle_cuda_runtime::{device_context::DeviceContext, stream::CudaStream,memory::HostSlice};
+use icicle_cuda_runtime::{device_context::DeviceContext, stream::CudaStream,memory::HostSlice, memory::DeviceVec};
 use icicle_core::{
-    ntt::{self, initialize_domain, NTTConfig, NTTDir, NttAlgorithm},
-    traits::FieldImpl,
+    ntt::{self, initialize_domain, NTTConfig, NTTDir, NttAlgorithm, Ordering},
+    traits::{FieldImpl},
 };
 
 use crate::verifier::{self, FriError};
@@ -134,13 +133,14 @@ where
             .into_iter()
             .map(|(domain, evals)| {
                 assert_eq!(domain.size(), evals.height());
+                // PART ONE - inverse FFT
+
                 let shift = Val::generator() / domain.shift;
                 let log_n = log2_strict_usize(domain.size());
 
                 let ctx = DeviceContext::default(); 
                 let size = 1 << log_n;
-                println!("size {:?}", size);
-                let plonky3_rou = BabyBear::two_adic_generator(26);
+                let plonky3_rou = Val::two_adic_generator(log_n+self.fri.log_blowup);
 
                 initialize_domain(ScalarField::from([plonky3_rou.clone().as_canonical_u32()]), &ctx, false).unwrap();
 
@@ -153,10 +153,9 @@ where
                 let stream = CudaStream::create().unwrap();
 
                 ntt_cfg.ctx.stream = &stream;
-                ntt_cfg.batch_size = 1 as i32;
+                ntt_cfg.batch_size = evals.width() as i32;
                 ntt_cfg.columns_batch = true;
-                ntt_cfg.ntt_algorithm = NttAlgorithm::Radix2;
-                ntt_cfg.coset_gen = <ScalarField as FieldImpl>::one();
+                ntt_cfg.coset_gen = ScalarField::from([shift.as_canonical_u32()]);
 
                 ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars.clone()[..]), NTTDir::kInverse, &ntt_cfg, &mut ntt_results[..]).unwrap();
 
@@ -164,17 +163,52 @@ where
                 ntt_results
                     .copy_to_host(HostSlice::from_mut_slice(&mut host_ntt_results[..]))
                     .unwrap();
-
                 let scalars_p3: Vec<Val> = host_ntt_results
                     .iter()
                     .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
                     .collect();
-                let matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width());
+                let mut matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width());
 
-                matrix_p3.bit_reverse_rows().to_row_major_matrix()
+                // PART TWO - scale up
+                matrix_p3 = matrix_p3.bit_reversed_zero_pad(self.fri.log_blowup);
+
+
+                // PART THREE - forward FFT
+                let log_n = log2_strict_usize(matrix_p3.height()) + 1;
+                let ctx = DeviceContext::default();
+                let size = 1 << log_n;
+                let plonky3_rou = Val::two_adic_generator(log_n+self.fri.log_blowup);//.inverse();
+                initialize_domain(ScalarField::from([plonky3_rou.clone().as_canonical_u32()]), &ctx, false).unwrap();
+
+                let mut ntt_results = DeviceVec::<ScalarField>::cuda_malloc(matrix_p3.values.len()).unwrap();
+                let mut host_ntt_results = vec![ScalarField::zero(); matrix_p3.values.len()];
+
+                let mut actual_scalars : Vec<ScalarField> = matrix_p3.values.iter().map(|x| ScalarField::from_u32((*x).as_canonical_u32())).collect();
+
+                let mut ntt_cfg: NTTConfig<'_, ScalarField> = NTTConfig::default();
+                let stream = CudaStream::create().unwrap();
+
+                ntt_cfg.ctx.stream = &stream;
+                ntt_cfg.batch_size = matrix_p3.width() as i32;
+                ntt_cfg.columns_batch = true;
+
+                ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars.clone()[..]), NTTDir::kForward, &ntt_cfg, &mut ntt_results[..]).unwrap();
+
+                stream.synchronize().unwrap();
+                ntt_results
+                    .copy_to_host(HostSlice::from_mut_slice(&mut host_ntt_results[..]))
+                    .unwrap();
+                let scalars_p3: Vec<Val> = host_ntt_results
+                    .iter()
+                    .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
+                    .collect();
+                let  matrix_res = RowMajorMatrix::new(scalars_p3, matrix_p3.width());
+                matrix_res
             })
             .collect();
-        assert_eq!(ldes[0].values[0..5], ldes_gpu[0].values[0..5]);
+        println!("First several values LDE {:?}", &ldes[0].values[0..10]);
+        println!("First several values LDE_GPU {:?}", &ldes_gpu[0].values[0..10]);
+        assert_eq!(ldes[0].values[0..100], ldes_gpu[0].values[0..100]);
         self.mmcs.commit(ldes)
     }
 
