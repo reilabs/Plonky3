@@ -73,6 +73,8 @@ impl<F: TwoAdicField> TwoAdicSubgroupDft<F> for Radix2DitParallel {
         par_dit_layer_rev(&mut mat, mid, &twiddles_inv);
         // We skip the final bit-reversal, since the next FFT expects bit-reversed input.
 
+        return mat.bit_reverse_rows();
+
         // Rescale coefficients in two ways:
         // - divide by height (since we're doing an inverse DFT)
         // - multiply by powers of the coset shift (see default coset LDE impl for an explanation)
@@ -85,7 +87,6 @@ impl<F: TwoAdicField> TwoAdicSubgroupDft<F> for Radix2DitParallel {
             // reverse_bits because mat is encoded in bit-reversed order
             mat.scale_row(reverse_bits(row, h), weight);
         }
-
         mat = mat.bit_reversed_zero_pad(added_bits);
 
         let h = mat.height();
