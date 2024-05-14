@@ -22,13 +22,14 @@ use serde::{Deserialize, Serialize};
 use tracing::{info_span, instrument};
 
 use p3_field::PrimeField32;
+use p3_util::reverse_bits;
 use icicle_babybear::field::ScalarField;
 use icicle_cuda_runtime::{device_context::DeviceContext, stream::CudaStream,memory::HostSlice, memory::DeviceVec};
 use icicle_core::{
-    ntt::{self, initialize_domain, NTTConfig, NTTDir, NttAlgorithm, Ordering},
+    ntt::{self, initialize_domain, NTTConfig, NTTDir, NttAlgorithm, Ordering, release_domain},
     traits::{FieldImpl},
 };
-
+use p3_field::{Powers};
 use crate::verifier::{self, FriError};
 use crate::{prover, FriConfig, FriProof};
 
@@ -167,19 +168,33 @@ where
                     .iter()
                     .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
                     .collect();
-                let mut matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width());
+                let mut matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width()).bit_reverse_rows().to_row_major_matrix();
 
                 // PART TWO - scale up
                 println!("p3 - size {} log_n {} matrix_p3.height {} matrix_p3.len {} matrix_p3.width {}", size, log_n, matrix_p3.height(), matrix_p3.values.len(), matrix_p3.width());
-                return matrix_p3.bit_reverse_rows().to_row_major_matrix();
+//                return matrix_p3.bit_reverse_rows().to_row_major_matrix();;
+            
+                let h = matrix_p3.height();
+                let h_inv = Val::from_canonical_usize(h).inverse();
 
+                let weights = Powers {
+                    base: shift,
+                    current: h_inv,
+                }
+                .take(h);
+                for (row, weight) in weights.enumerate() {
+                    // reverse_bits because mat is encoded in bit-reversed order
+                    matrix_p3.scale_row(reverse_bits(row, h), weight);
+                }
+//                return matrix_p3;//.bit_reverse_rows().to_row_major_matrix();
 
+                matrix_p3 = matrix_p3.bit_reversed_zero_pad(self.fri.log_blowup).bit_reverse_rows().to_row_major_matrix();
                 // PART THREE - forward FFT
-                /*
+                release_domain::<ScalarField>(&ctx).unwrap(); 
                 let log_n = log2_strict_usize(matrix_p3.height());
                 let ctx = DeviceContext::default();
                 let size = 1 << log_n;
-                let plonky3_rou = Val::two_adic_generator(log_n);
+                let plonky3_rou = Val::two_adic_generator(log_n+self.fri.log_blowup);
                 initialize_domain(ScalarField::from([plonky3_rou.clone().as_canonical_u32()]), &ctx, false).unwrap();
 
                 let mut ntt_results2 = DeviceVec::<ScalarField>::cuda_malloc(matrix_p3.values.len()).unwrap();
@@ -205,16 +220,15 @@ where
                     .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
                     .collect();
                 let  matrix_res = RowMajorMatrix::new(scalars_p3, matrix_p3.width());
+                release_domain::<ScalarField>(&ctx).unwrap();
                 matrix_res.bit_reverse_rows().to_row_major_matrix()
-                 */
-                
             })
             .collect();
         println!("First several values LDE {:?}", &ldes[0].values[0..10]);
         println!("First several values LDE_GPU {:?}", &ldes_gpu[0].values[0..10]);
         for index in 0..(ldes.len()-1) {
             for i in 0..(ldes[index].values.len()) {
-                println!("Processing {} at {}", index, i);
+                //println!("Processing {} at {}", index, i);
                 let correct  = ldes[index].values[i];
                 let gpu = ldes_gpu[index].values[i];
                 assert_eq!(correct, gpu);
@@ -682,4 +696,5 @@ mod tests {
         */
     }
 }
+
 
