@@ -143,7 +143,7 @@ where
                 let size = 1 << log_n;
                 let plonky3_rou = Val::two_adic_generator(log_n).inverse();
                 println!("p1 - size {} log_n {} evals.height {} evals.len {} evals.width {} shift {}", size, log_n, evals.height(), evals.values.len(), evals.width(), shift);
-                initialize_domain(ScalarField::from([plonky3_rou.clone().as_canonical_u32()]), &ctx, false).unwrap();
+                initialize_domain(ScalarField::from([plonky3_rou.as_canonical_u32()]), &ctx, true).unwrap();
 
                 let mut ntt_results = DeviceVec::<ScalarField>::cuda_malloc(evals.values.len()).unwrap();
                 let mut host_ntt_results = vec![ScalarField::zero(); evals.values.len()];
@@ -151,20 +151,16 @@ where
                 let mut actual_scalars : Vec<ScalarField> = evals.values.iter().map(|x| ScalarField::from_u32((*x).as_canonical_u32())).collect();
 
                 let mut ntt_cfg: NTTConfig<'_, ScalarField> = NTTConfig::default();
-                let stream = CudaStream::create().unwrap();
-
-                ntt_cfg.ctx.stream = &stream;
                 ntt_cfg.batch_size = evals.width() as i32;
                 ntt_cfg.columns_batch = true;
-                //ntt_cfg.coset_gen = ScalarField::from([shift.as_canonical_u32()]);
     
-                ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars.clone()[..]), NTTDir::kForward, &ntt_cfg, &mut ntt_results[..]).unwrap();
+                ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars[..]), NTTDir::kForward, &ntt_cfg, &mut ntt_results[..]).unwrap();
 
-                stream.synchronize().unwrap();
+                ntt_cfg.ctx.stream.synchronize().unwrap();
                 ntt_results
                     .copy_to_host(HostSlice::from_mut_slice(&mut host_ntt_results[..]))
                     .unwrap();
-                let scalars_p3: Vec<Val> = host_ntt_results
+                let mut scalars_p3: Vec<Val> = host_ntt_results
                     .iter()
                     .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
                     .collect();
@@ -172,7 +168,6 @@ where
 
                 // PART TWO - scale up
                 println!("p3 - size {} log_n {} matrix_p3.height {} matrix_p3.len {} matrix_p3.width {}", size, log_n, matrix_p3.height(), matrix_p3.values.len(), matrix_p3.width());
-//                return matrix_p3.bit_reverse_rows().to_row_major_matrix();;
             
                 let h = matrix_p3.height();
                 let h_inv = Val::from_canonical_usize(h).inverse();
@@ -186,42 +181,37 @@ where
                     // reverse_bits because mat is encoded in bit-reversed order
                     matrix_p3.scale_row(reverse_bits(row, h), weight);
                 }
-//                return matrix_p3;//.bit_reverse_rows().to_row_major_matrix();
 
                 matrix_p3 = matrix_p3.bit_reversed_zero_pad(self.fri.log_blowup).bit_reverse_rows().to_row_major_matrix();
                 // PART THREE - forward FFT
-                release_domain::<ScalarField>(&ctx).unwrap(); 
+                release_domain::<ScalarField>(&ntt_cfg.ctx).unwrap(); 
                 let log_n = log2_strict_usize(matrix_p3.height());
                 let ctx = DeviceContext::default();
                 let size = 1 << log_n;
                 let plonky3_rou = Val::two_adic_generator(log_n+self.fri.log_blowup);
-                initialize_domain(ScalarField::from([plonky3_rou.clone().as_canonical_u32()]), &ctx, false).unwrap();
+                initialize_domain(ScalarField::from([plonky3_rou.as_canonical_u32()]), &ntt_cfg.ctx, true).unwrap();
 
-                let mut ntt_results2 = DeviceVec::<ScalarField>::cuda_malloc(matrix_p3.values.len()).unwrap();
-                let mut host_ntt_results = vec![ScalarField::zero(); matrix_p3.values.len()];
-
-                let mut actual_scalars : Vec<ScalarField> = matrix_p3.values.iter().map(|x| ScalarField::from_u32((*x).as_canonical_u32())).collect();
+                ntt_results = DeviceVec::<ScalarField>::cuda_malloc(matrix_p3.values.len()).unwrap();
+                host_ntt_results = vec![ScalarField::zero(); matrix_p3.values.len()];
+                actual_scalars = matrix_p3.values.iter().map(|x| ScalarField::from_u32((*x).as_canonical_u32())).collect();
 
                 let mut ntt_cfg2: NTTConfig<'_, ScalarField> = NTTConfig::default();
-                let stream = CudaStream::create().unwrap();
-
-                ntt_cfg2.ctx.stream = &stream;
                 ntt_cfg2.batch_size = matrix_p3.width() as i32;
                 ntt_cfg2.columns_batch = true;
 
-                ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars.clone()[..]), NTTDir::kForward, &ntt_cfg2, &mut ntt_results2[..]).unwrap();
+                ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars[..]), NTTDir::kForward, &ntt_cfg2, &mut ntt_results[..]).unwrap();
 
-                stream.synchronize().unwrap();
-                ntt_results2
+                ntt_cfg2.ctx.stream.synchronize().unwrap();
+                ntt_results
                     .copy_to_host(HostSlice::from_mut_slice(&mut host_ntt_results[..]))
                     .unwrap();
-                let scalars_p3: Vec<Val> = host_ntt_results
+                scalars_p3 = host_ntt_results
                     .iter()
                     .map(|x| Val::from_wrapped_u32(Into::<[u32; 1]>::into(*x)[0]))
                     .collect();
-                let  matrix_res = RowMajorMatrix::new(scalars_p3, matrix_p3.width());
-                release_domain::<ScalarField>(&ctx).unwrap();
-                matrix_res.bit_reverse_rows().to_row_major_matrix()
+                matrix_p3 = RowMajorMatrix::new(scalars_p3, matrix_p3.width());
+                release_domain::<ScalarField>(&ntt_cfg2.ctx).unwrap();
+                matrix_p3.bit_reverse_rows().to_row_major_matrix()
             })
             .collect();
         println!("First several values LDE {:?}", &ldes[0].values[0..10]);
