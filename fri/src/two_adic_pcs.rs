@@ -167,8 +167,6 @@ where
                 let mut matrix_p3 = RowMajorMatrix::new(scalars_p3, evals.width()).bit_reverse_rows().to_row_major_matrix();
 
                 // PART TWO - scale up
-                println!("p3 - size {} log_n {} matrix_p3.height {} matrix_p3.len {} matrix_p3.width {}", size, log_n, matrix_p3.height(), matrix_p3.values.len(), matrix_p3.width());
-            
                 let h = matrix_p3.height();
                 let h_inv = Val::from_canonical_usize(h).inverse();
 
@@ -188,7 +186,7 @@ where
                 let log_n = log2_strict_usize(matrix_p3.height());
                 let ctx = DeviceContext::default();
                 let size = 1 << log_n;
-                let plonky3_rou = Val::two_adic_generator(log_n+self.fri.log_blowup);
+                let plonky3_rou = Val::two_adic_generator(log_n);
                 initialize_domain(ScalarField::from([plonky3_rou.as_canonical_u32()]), &ntt_cfg.ctx, true).unwrap();
 
                 ntt_results = DeviceVec::<ScalarField>::cuda_malloc(matrix_p3.values.len()).unwrap();
@@ -198,7 +196,7 @@ where
                 let mut ntt_cfg2: NTTConfig<'_, ScalarField> = NTTConfig::default();
                 ntt_cfg2.batch_size = matrix_p3.width() as i32;
                 ntt_cfg2.columns_batch = true;
-
+                println!("p3 - size {} log_n {} matrix_p3.height {} matrix_p3.len {} matrix_p3.width {}", size, log_n, matrix_p3.height(), matrix_p3.values.len(), matrix_p3.width());
                 ntt::ntt(HostSlice::from_mut_slice(&mut actual_scalars[..]), NTTDir::kForward, &ntt_cfg2, &mut ntt_results[..]).unwrap();
 
                 ntt_cfg2.ctx.stream.synchronize().unwrap();
